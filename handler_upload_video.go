@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
@@ -15,6 +18,7 @@ import (
 )
 
 func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request) {
+	
 	videoIDString := r.PathValue("videoID")
 
 	videoID, err := uuid.Parse(videoIDString)
@@ -88,6 +92,22 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	ratio, err := getVideoAspectRatio(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't get video aspect ratio", err)
+		return
+	}
+	
+	var prefix string
+	if ratio == "16:9" {
+		prefix = "landscape/"
+	} else if ratio == "9:16" {
+		prefix = "portrait/"
+	} else {
+		prefix = "other/"
+	}
+
+
 	fileName := make([]byte, 32)
 	_, err = rand.Read(fileName)
 	if err != nil {
@@ -95,7 +115,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	b := base64.RawURLEncoding.EncodeToString(fileName) + ".mp4"
+	b := prefix + base64.RawURLEncoding.EncodeToString(fileName) + ".mp4"
 
 	obj := s3.PutObjectInput{
 		Bucket: &cfg.s3Bucket,
@@ -120,4 +140,47 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+}
+
+
+func getVideoAspectRatio(filepath string) (string, error) {
+	cmd := exec.Command("ffprobe", "-v", "error", "-print_format", "json", "-show_streams", filepath)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+
+	err := cmd.Run()
+	if err != nil {
+		return "", err
+	}
+
+	var videoData struct {
+		Streams []struct {
+		Width int `json:"width"`
+		Height int `json:"height"` 
+		} `json:"streams"`	
+	}
+
+	if err := json.Unmarshal([]byte(out.String()), &videoData); err != nil {
+		return "", err
+	}
+
+	width := videoData.Streams[0].Width
+	height := videoData.Streams[0].Height
+	x := gcd(width, height)
+	aspectRatio := fmt.Sprintf("%d:%d", width/x, height/x)
+	ratio := float32(width) / float32(height)
+	if aspectRatio == "16:9" || (ratio > (float32(16) / float32(9)) - .01 && ratio < (float32(16) / float32(9)) + .01) {
+		return "16:9", nil
+	}
+	if aspectRatio == "9:16" || (ratio > (float32(9) / float32(16)) - .01 && ratio < (float32(9) / float32(16)) + .01) {
+		return "9:16", nil
+	}
+	return "other", nil
+}
+
+func gcd(a int, b int) int{
+	if b == 0 {
+		return a
+	}
+	return gcd(b, a%b)
 }
