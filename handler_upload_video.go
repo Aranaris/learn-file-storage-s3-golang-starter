@@ -77,9 +77,6 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	defer os.Remove(tempFile.Name())
-	defer tempFile.Close()
-
 	_, err = io.Copy(tempFile, videoFile)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't save video file", err)
@@ -88,11 +85,29 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 
 	_, err = tempFile.Seek(0, io.SeekStart)
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Couldn't update save file", err)
+		respondWithError(w, http.StatusInternalServerError, "Couldn't update seek start for tempfile", err)
 		return
 	}
 
-	ratio, err := getVideoAspectRatio(tempFile.Name())
+	processedFilePath, err := processVideoForFastStart(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't process video for fast start", err)
+		return
+	}
+
+	processedFile, err := os.Open(processedFilePath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't read process video", err)
+		return
+	}
+
+	os.Remove(tempFile.Name())
+	tempFile.Close()
+
+	defer os.Remove(processedFile.Name())
+	defer processedFile.Close()
+
+	ratio, err := getVideoAspectRatio(processedFile.Name())
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't get video aspect ratio", err)
 		return
@@ -120,7 +135,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	obj := s3.PutObjectInput{
 		Bucket: &cfg.s3Bucket,
 		Key: &b,
-		Body: tempFile,
+		Body: processedFile,
 		ContentType: &videoMediaType,
 	}
 	
@@ -183,4 +198,14 @@ func gcd(a int, b int) int{
 		return a
 	}
 	return gcd(b, a%b)
+}
+
+func processVideoForFastStart(filepath string) (string, error) {
+	outputFilepath := filepath + ".processing"
+	cmd := exec.Command("ffmpeg", "-i", filepath, "-c", "copy", "-movflags", "faststart", "-f", "mp4", outputFilepath)
+	if err := cmd.Run(); err != nil {
+		return "", err
+	}
+
+	return outputFilepath, nil
 }
